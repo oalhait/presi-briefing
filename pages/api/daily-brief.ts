@@ -6,6 +6,7 @@ import { parseStringPromise } from "xml2js";
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const alphaVantageApiKey = process.env.ALPHA_VANTAGE_API_KEY;
 const productHuntApiKey = process.env.PRODUCT_HUNT_API_KEY;
+const resendApiKey = process.env.RESEND_API_KEY;
 
 interface FeedItem {
   title?: string[];
@@ -63,22 +64,24 @@ async function fetchMarketData(): Promise<string> {
 
 async function fetchProductHuntPosts(): Promise<string> {
   try {
-    const today = new Date().toISOString().split('T')[0];
-    const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
-    const response = await fetch('https://api.producthunt.com/v2/api/graphql', {
-      method: 'POST',
+    const today = new Date().toISOString().split("T")[0];
+    const tomorrow = new Date(Date.now() + 86400000)
+      .toISOString()
+      .split("T")[0];
+    const response = await fetch("https://api.producthunt.com/v2/api/graphql", {
+      method: "POST",
       headers: {
-        'Authorization': `Bearer ${productHuntApiKey}`,
-        'Content-Type': 'application/json'
+        Authorization: `Bearer ${productHuntApiKey}`,
+        "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        query: `query { posts(first: 10, order: VOTES, postedAfter: \"${today}\", postedBefore: \"${tomorrow}\") { edges { node { name tagline url votesCount } } } }`
-      })
+        query: `query { posts(first: 10, order: VOTES, postedAfter: \"${today}\", postedBefore: \"${tomorrow}\") { edges { node { name tagline url votesCount } } } }`,
+      }),
     });
 
     const data = await response.json();
     if (data.errors) {
-      console.error('Product Hunt API errors:', data.errors);
+      console.error("Product Hunt API errors:", data.errors);
       throw new Error(`Product Hunt API error: ${JSON.stringify(data.errors)}`);
     }
 
@@ -90,11 +93,14 @@ async function fetchProductHuntPosts(): Promise<string> {
     }
 
     return data.data.posts.edges
-      .map(({ node }: { node: ProductHuntNode }) => `${node.name} (${node.url}) - ${node.tagline} (Votes: ${node.votesCount})`)
-      .join('\n');
+      .map(
+        ({ node }: { node: ProductHuntNode }) =>
+          `${node.name} (${node.url}) - ${node.tagline} (Votes: ${node.votesCount})`
+      )
+      .join("\n");
   } catch (error) {
-    console.error('Error fetching Product Hunt posts:', error);
-    return 'Product Hunt data unavailable';
+    console.error("Error fetching Product Hunt posts:", error);
+    return "Product Hunt data unavailable";
   }
 }
 
@@ -191,4 +197,56 @@ async function sendEmail(body: string): Promise<void> {
     const response = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
-        Authorization: `
+        Authorization: `Bearer ${resendApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: "Daily Brief <on@resend.dev>",
+        to: ["alhait.omar@gmail.com"],
+        subject: `Your Daily Brief — ${new Date().toLocaleDateString("en-US")}`,
+        html: body,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(
+        `Resend API error: ${errorData.message || response.statusText}`
+      );
+    }
+
+    console.log("Email sent successfully");
+  } catch (error) {
+    console.error("Error sending email:", error);
+    throw error;
+  }
+}
+
+export default async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse
+) {
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  try {
+    console.log("Starting daily brief generation...");
+    const brief = await buildBrief();
+    console.log("Brief generated, sending email...");
+    await sendEmail(brief);
+    console.log("Daily brief sent successfully");
+
+    res.status(200).json({
+      success: true,
+      message: "Daily brief sent successfully",
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("Error in daily brief cron job:", error);
+    res.status(500).json({
+      error: "Failed to send daily brief",
+      details: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+}
