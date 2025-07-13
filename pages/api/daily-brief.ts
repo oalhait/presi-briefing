@@ -7,6 +7,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const alphaVantageApiKey = process.env.ALPHA_VANTAGE_API_KEY;
 const productHuntApiKey = process.env.PRODUCT_HUNT_API_KEY;
 const resendApiKey = process.env.RESEND_API_KEY;
+const fmpApiKey = process.env.FMP_API_KEY;
 
 interface FeedItem {
   title?: string[];
@@ -37,25 +38,86 @@ async function fetchAndParseRSS(url: string): Promise<FeedItem[]> {
 
 async function fetchMarketData(): Promise<string> {
   try {
-    const sp500 = await fetch(
-      `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=^GSPC&apikey=${alphaVantageApiKey}`
-    ).then((res) => res.json());
-    const nasdaq = await fetch(
-      `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=^IXIC&apikey=${alphaVantageApiKey}`
-    ).then((res) => res.json());
-    const bitcoin = await fetch(
-      `https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency=BTC&to_currency=USD&apikey=${alphaVantageApiKey}`
-    ).then((res) => res.json());
+    const symbols = ["SPY", "QQQ"];
+    const marketData: {
+      [key: string]: { price: number; changePercent: string };
+    } = {};
 
-    const sp500Price = sp500["Global Quote"]?.["05. price"] || "N/A";
-    const sp500Change = sp500["Global Quote"]?.["10. change percent"] || "N/A";
-    const nasdaqPrice = nasdaq["Global Quote"]?.["05. price"] || "N/A";
-    const nasdaqChange =
-      nasdaq["Global Quote"]?.["10. change percent"] || "N/A";
-    const bitcoinPrice =
-      bitcoin["Realtime Currency Exchange Rate"]?.["5. Exchange Rate"] || "N/A";
+    for (const symbol of symbols) {
+      const url = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${symbol}&apikey=${alphaVantageApiKey}`;
 
-    return `Market snapshot: S&P 500: ${sp500Price} (${sp500Change}), Nasdaq: ${nasdaqPrice} (${nasdaqChange}), Bitcoin: $${bitcoinPrice}`;
+      const response = await fetch(url);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`Alpha Vantage API error for ${symbol}:`, errorText);
+        throw new Error(
+          `Alpha Vantage API failed with status ${response.status}: ${errorText}`
+        );
+      }
+
+      const data = await response.json();
+      const timeSeries = data["Time Series (Daily)"];
+
+      if (!timeSeries) {
+        console.error(`Response data for ${symbol}:`, data);
+        throw new Error(
+          `Unexpected Alpha Vantage response format for ${symbol}`
+        );
+      }
+
+      const dates = Object.keys(timeSeries).sort().slice(-2);
+      if (dates.length < 2) {
+        throw new Error(`Insufficient data for ${symbol} change calculation`);
+      }
+
+      const closeKey = "4. close";
+      const latestCloseRaw = timeSeries[dates[1]][closeKey];
+      const previousCloseRaw = timeSeries[dates[0]][closeKey];
+      console.log(
+        `Raw close values for ${symbol}: latest=${latestCloseRaw}, previous=${previousCloseRaw}`
+      );
+      const latestClose = parseFloat(latestCloseRaw);
+      const previousClose = parseFloat(previousCloseRaw);
+      const change = latestClose - previousClose;
+      const changePercent = (change / previousClose) * 100;
+
+      marketData[symbol] = {
+        price: latestClose,
+        changePercent: changePercent.toFixed(2),
+      };
+    }
+
+    // Fetch Bitcoin data from CoinGecko
+    const cgResponse = await fetch(
+      "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true"
+    );
+
+    if (!cgResponse.ok) {
+      const errorText = await cgResponse.text();
+      console.error("CoinGecko API error:", errorText);
+      throw new Error(
+        `CoinGecko API failed with status ${cgResponse.status}: ${errorText}`
+      );
+    }
+
+    const cgData = await cgResponse.json();
+    const btcData = cgData["bitcoin"];
+
+    if (!btcData) {
+      throw new Error("Unexpected CoinGecko response format");
+    }
+
+    const btcPrice = btcData.usd;
+    const btcChangePercent = btcData.usd_24h_change.toFixed(2);
+
+    return `Market snapshot: S&P 500 (via SPY): $${marketData[
+      "SPY"
+    ].price.toFixed(2)} (${
+      marketData["SPY"].changePercent
+    }%), Nasdaq (via QQQ): $${marketData["QQQ"].price.toFixed(2)} (${
+      marketData["QQQ"].changePercent
+    }%), Bitcoin: $${btcPrice.toFixed(2)} (${btcChangePercent}%)`;
   } catch (error) {
     console.error("Error fetching market data:", error);
     return "Market data unavailable";
@@ -64,10 +126,8 @@ async function fetchMarketData(): Promise<string> {
 
 async function fetchProductHuntPosts(): Promise<string> {
   try {
-    const today = new Date().toISOString().split("T")[0];
-    const tomorrow = new Date(Date.now() + 86400000)
-      .toISOString()
-      .split("T")[0];
+    const now = new Date().toISOString();
+    const yesterday = new Date(Date.now() - 86400000).toISOString();
     const response = await fetch("https://api.producthunt.com/v2/api/graphql", {
       method: "POST",
       headers: {
@@ -75,7 +135,7 @@ async function fetchProductHuntPosts(): Promise<string> {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        query: `query { posts(first: 10, order: VOTES, postedAfter: \"${today}\", postedBefore: \"${tomorrow}\") { edges { node { name tagline url votesCount } } } }`,
+        query: `query { posts(first: 10, order: VOTES, postedAfter: \"${yesterday}\", postedBefore: \"${now}\") { edges { node { name tagline url votesCount } } } }`,
       }),
     });
 
@@ -149,7 +209,7 @@ async function buildBrief(): Promise<string> {
       .join("\n");
 
     const prompt = `
-Give me a crisp bullet summary (≤2 sentences each) of:
+Give me a crisp bullet summary (≤3 sentences each) of:
 1. notable AI research news (especially large-model papers),
 2. any YC/Techstars company milestones,
 3. top world news,
